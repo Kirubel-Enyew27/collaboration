@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"collaboration/internal/events"
+	"collaboration/internal/room"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,15 +25,30 @@ type Client struct {
 	Logger  *zap.Logger
 	Room    string
 	OnClose func(*Client)
+	ED      *events.Dispatcher
+	Pres    interface {
+		MarkActive(room.Participant, string)
+		MarkOnline(room.Participant, string)
+		MarkOffline(room.Participant, string)
+	}
 }
 
-func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger) *Client {
+func (c *Client) GetID() string { return c.ID }
+
+func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger,
+	ed *events.Dispatcher, pres interface {
+		MarkActive(room.Participant, string)
+		MarkOnline(room.Participant, string)
+		MarkOffline(room.Participant, string)
+	}) *Client {
 	return &Client{
 		ID:     uuid.NewString(),
 		Hub:    hub,
 		Conn:   conn,
 		Send:   make(chan []byte, 256),
 		Logger: logger,
+		ED:     ed,
+		Pres:   pres,
 	}
 }
 
@@ -68,7 +85,19 @@ func (c *Client) ReadPump() {
 			}
 			break
 		}
+		if c.Pres != nil {
+			_ = tryMarkActive(c.Pres, c, c.Room)
+		}
+
+		if c.ED != nil {
+			if err := c.ED.Dispatch(c, message); err != nil {
+				c.Logger.Warn("dispatch error", zap.Error(err))
+			}
+			continue
+		}
+
 		c.Logger.Debug("received message", zap.Int("len", len(message)))
+		zap.String("client", c.ID)
 	}
 }
 
@@ -113,4 +142,22 @@ func (c *Client) Close() {
 	default:
 	}
 	close(c.Send)
+}
+
+func tryMarkActive(pres interface{}, participant interface{}, roomName string) bool {
+	type marker interface {
+		MarkActive(interface{}, string)
+	}
+	if m, ok := pres.(marker); ok {
+		m.MarkActive(participant.(room.Participant), roomName)
+		return true
+	}
+	type m2 interface {
+		MarkActive(room.Participant, string)
+	}
+	if m, ok := pres.(m2); ok {
+		m.MarkActive(participant.(room.Participant), roomName)
+		return true
+	}
+	return false
 }

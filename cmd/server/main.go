@@ -1,8 +1,10 @@
 package main
 
 import (
+	"collaboration/internal/events"
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
+	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/ws"
 	"context"
@@ -25,6 +27,11 @@ func main() {
 
 	rm := room.NewManager(log)
 
+	pres := presence.NewManager(rm, log)
+	pres.Start()
+
+	ed := events.NewDispatcher(rm, pres, log)
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -33,7 +40,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.GET("/ws", handlers.NewWSHandler(hub, rm, log))
+	r.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
 
 	r.POST("/rooms", func(c *gin.Context) {
 		var body struct {
@@ -85,6 +92,8 @@ func main() {
 	}
 
 	hub.Shutdown()
+
+	pres.Shutdown()
 
 	log.Info("server exiting")
 }

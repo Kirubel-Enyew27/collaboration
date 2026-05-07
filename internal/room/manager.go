@@ -1,12 +1,16 @@
 package room
 
 import (
-	"collaboration/internal/ws"
 	"errors"
 	"sync"
 
 	"go.uber.org/zap"
 )
+
+type Participant interface {
+	GetID() string
+	SendMessage([]byte)
+}
 
 type Manager struct {
 	mu     sync.RWMutex
@@ -16,7 +20,7 @@ type Manager struct {
 
 type Room struct {
 	name         string
-	participants map[string]*ws.Client
+	participants map[string]Participant
 }
 
 func NewManager(logger *zap.Logger) *Manager {
@@ -37,13 +41,13 @@ func (m *Manager) CreateRoom(name string) error {
 	}
 	m.rooms[name] = &Room{
 		name:         name,
-		participants: make(map[string]*ws.Client),
+		participants: make(map[string]Participant),
 	}
 	m.logger.Info("room created", zap.String("room", name))
 	return nil
 }
 
-func (m *Manager) Join(name string, client *ws.Client) error {
+func (m *Manager) Join(name string, p Participant) error {
 	if name == "" {
 		return errors.New("room name required")
 	}
@@ -52,37 +56,28 @@ func (m *Manager) Join(name string, client *ws.Client) error {
 	if !ok {
 		r = &Room{
 			name:         name,
-			participants: make(map[string]*ws.Client),
+			participants: make(map[string]Participant),
 		}
 		m.rooms[name] = r
 		m.logger.Info("room auto-created on join", zap.String("room", name))
 	}
-	r.participants[client.ID] = client
+	r.participants[p.GetID()] = p
 	m.mu.Unlock()
 
-	client.Room = name
-	prev := client.OnClose
-	client.OnClose = func(c *ws.Client) {
-		m.Leave(name, c)
-		if prev != nil {
-			prev(c)
-		}
-	}
-
-	m.logger.Debug("client joined room", zap.String("room", name), zap.String("client", client.ID))
+	m.logger.Debug("participant joined room", zap.String("room", name), zap.String("participant", p.GetID()))
 	return nil
 }
 
-func (m *Manager) Leave(name string, client *ws.Client) error {
+func (m *Manager) Leave(name string, p Participant) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.rooms[name]
 	if !ok {
 		return nil
 	}
-	delete(r.participants, client.ID)
-	m.logger.Debug("client left room", zap.String("room", name),
-		zap.String("client", client.ID))
+	delete(r.participants, p.GetID())
+	m.logger.Debug("participant left room", zap.String("room", name),
+		zap.String("participant", p.GetID()))
 
 	if len(r.participants) == 0 {
 		delete(m.rooms, name)
