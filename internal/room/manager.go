@@ -1,8 +1,11 @@
 package room
 
 import (
+	"context"
 	"errors"
 	"sync"
+
+	"collaboration/internal/store"
 
 	"go.uber.org/zap"
 )
@@ -20,6 +23,7 @@ type Manager struct {
 	mu     sync.RWMutex
 	rooms  map[string]*Room
 	logger *zap.Logger
+	repo   store.RoomRepository
 }
 
 // Room represents a collaboration room with participants keyed by participant ID.
@@ -29,10 +33,11 @@ type Room struct {
 }
 
 // NewManager creates a room manager.
-func NewManager(logger *zap.Logger) *Manager {
+func NewManager(logger *zap.Logger, repo store.RoomRepository) *Manager {
 	return &Manager{
 		rooms:  make(map[string]*Room),
 		logger: logger,
+		repo:   repo,
 	}
 }
 
@@ -48,6 +53,10 @@ func (m *Manager) CreateRoom(name string) error {
 	}
 	m.rooms[name] = &Room{name: name, participants: make(map[string]Participant)}
 	m.logger.Info("room created", zap.String("room", name))
+	if m.repo != nil {
+		// best-effort persist
+		_ = m.repo.CreateRoom(context.Background(), name)
+	}
 	return nil
 }
 
@@ -83,6 +92,10 @@ func (m *Manager) Leave(name string, p Participant) error {
 	if len(r.participants) == 0 {
 		delete(m.rooms, name)
 		m.logger.Info("room removed (empty)", zap.String("room", name))
+		if m.repo != nil {
+			// best-effort delete persisted room
+			_ = m.repo.DeleteRoom(context.Background(), name)
+		}
 	}
 	return nil
 }

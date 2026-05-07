@@ -1,14 +1,16 @@
 package state
 
 import (
-    "encoding/json"
-    "errors"
-    "sync"
-    "sync/atomic"
+	"context"
+	"encoding/json"
+	"errors"
+	"sync"
+	"sync/atomic"
 
-    "collaboration/internal/room"
+	"collaboration/internal/room"
+	"collaboration/internal/store"
 
-    "go.uber.org/zap"
+	"go.uber.org/zap"
 )
 
 // RoomState holds state and version for a room.
@@ -23,12 +25,14 @@ type Manager struct {
     mu     sync.RWMutex
     rooms  map[string]*RoomState
     rm     *room.Manager
+    store  store.EventRepository
     logger *zap.Logger
 }
 
 // NewManager creates a state manager that will use room.Manager for broadcasts.
-func NewManager(rm *room.Manager, logger *zap.Logger) *Manager {
-    return &Manager{rooms: make(map[string]*RoomState), rm: rm, logger: logger}
+// Optionally accepts an EventRepository to persist updates.
+func NewManager(rm *room.Manager, logger *zap.Logger, repo store.EventRepository) *Manager {
+    return &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
 }
 
 // ensureRoom gets or creates a RoomState.
@@ -62,8 +66,8 @@ func (m *Manager) GetState(name string) (int64, json.RawMessage, error) {
 }
 
 // ApplyUpdate replaces the room state with the provided payload, increments
-// the server-side version, and broadcasts the new state to room members.
-// This uses server-assigned monotonic versioning to ensure consistent ordering.
+// the server-side version, persists the event (if repo available), and
+// broadcasts the new state to room members.
 func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, json.RawMessage, error) {
     if roomName == "" {
         return 0, nil, errors.New("room name required")
@@ -75,6 +79,15 @@ func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, 
     // simple replace strategy: server assigns next version and stores payload
     newVersion := atomic.AddInt64(&r.version, 1)
     r.data = append(json.RawMessage(nil), payload...)
+
+    // persist event if store provided
+    if m.store != nil {
+        ev := &store.Event{Type: "update", Room: roomName, Payload: r.data, Version: newVersion}
+        // best-effort persist; log errors but continue
+        if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
+            m.logger.Warn("failed to persist event", zap.Error(err))
+        }
+    }
 
     // prepare broadcast envelope
     envelope := map[string]any{

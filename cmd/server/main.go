@@ -15,6 +15,7 @@ import (
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/state"
+	"collaboration/internal/store/sqlite"
 	"collaboration/internal/ws"
 
 	"github.com/gin-gonic/gin"
@@ -30,15 +31,23 @@ func main() {
 	hub := ws.NewHub(log)
 	go hub.Run()
 
-	// Room manager
-	rm := room.NewManager(log)
+
+	// Initialize persistence (SQLite)
+	sqldb, err := sqlite.NewSQLiteStore("./data.db")
+	if err != nil {
+		log.Fatal("failed to open sqlite store", zap.Error(err))
+	}
+	defer sqldb.Close()
+
+	// Room manager (backed by store)
+	rm := room.NewManager(log, sqldb)
 
 	// Presence manager
 	pres := presence.NewManager(rm, log)
 	pres.Start()
 
-	// State manager
-	st := state.NewManager(rm, log)
+	// State manager (persist events)
+	st := state.NewManager(rm, log, sqldb)
 
 	// Event dispatcher
 	ed := events.NewDispatcher(rm, pres, st, log)
