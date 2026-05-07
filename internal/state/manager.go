@@ -7,7 +7,9 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"collaboration/internal/metrics"
 	"collaboration/internal/room"
 	"collaboration/internal/store"
 
@@ -52,10 +54,13 @@ func NewManager(rm *room.Manager, logger *zap.Logger, repo store.EventRepository
             go func() {
                 defer m.wg.Done()
                 for ev := range m.persistQueue {
-                    // best-effort persist with background context
+                    start := time.Now()
                     if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
                         m.logger.Warn("worker failed persist event", zap.Error(err))
                     }
+                    metrics.ObservePersistDuration(time.Since(start))
+                    // update queue length metric
+                    metrics.SetPersistQueueLength(float64(len(m.persistQueue)))
                 }
             }()
         }
@@ -124,8 +129,10 @@ func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, 
         select {
         case m.persistQueue <- ev:
             // enqueued
+            metrics.SetPersistQueueLength(float64(len(m.persistQueue)))
         default:
             m.logger.Warn("persist queue full, dropping persist event", zap.String("room", roomName))
+            metrics.SetPersistQueueLength(float64(len(m.persistQueue)))
         }
     }
 

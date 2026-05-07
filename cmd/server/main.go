@@ -12,6 +12,7 @@ import (
 	"collaboration/internal/events"
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
+	"collaboration/internal/metrics"
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/state"
@@ -19,6 +20,7 @@ import (
 	"collaboration/internal/ws"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
@@ -26,6 +28,9 @@ func main() {
 	// Initialize logger
 	log := logger.NewLogger()
 	defer log.Sync()
+
+	// Register metrics
+	metrics.Register()
 
 	// Create hub and run it
 	hub := ws.NewHub(log)
@@ -70,6 +75,9 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	// Prometheus metrics endpoint
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Protected routes require API key
 	authGroup := r.Group("/", authz.Middleware())

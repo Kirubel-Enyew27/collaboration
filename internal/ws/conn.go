@@ -2,6 +2,7 @@ package ws
 
 import (
 	"collaboration/internal/events"
+	"collaboration/internal/metrics"
 	"collaboration/internal/room"
 	"sync"
 	"time"
@@ -28,9 +29,14 @@ type Client struct {
 	Room    string
 	OnClose func(*Client)
 	ED      *events.Dispatcher
-	Pres    interface{ MarkActive(room.Participant, string); MarkOnline(room.Participant, string); MarkOffline(room.Participant, string) }
+	Pres    interface {
+		MarkActive(room.Participant, string)
+		MarkOnline(room.Participant, string)
+		MarkOffline(room.Participant, string)
+	}
 	// heartbeat and slow-client detection
 	lastPong  time.Time
+	lastPing  time.Time
 	dropCount int
 	mu        sync.Mutex
 	closeOnce sync.Once
@@ -40,7 +46,11 @@ type Client struct {
 func (c *Client) GetID() string { return c.ID }
 
 // NewClient constructs a client and registers it with the hub.
-func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger, ed *events.Dispatcher, pres interface{ MarkActive(room.Participant, string); MarkOnline(room.Participant, string); MarkOffline(room.Participant, string) }) *Client {
+func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger, ed *events.Dispatcher, pres interface {
+	MarkActive(room.Participant, string)
+	MarkOnline(room.Participant, string)
+	MarkOffline(room.Participant, string)
+}) *Client {
 	return &Client{
 		ID:     uuid.New().String(),
 		Hub:    hub,
@@ -64,6 +74,7 @@ func (c *Client) SendMessage(b []byte) {
 		drops := c.dropCount
 		c.mu.Unlock()
 		c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID), zap.Int("drops", drops))
+		metrics.IncDroppedMessages(1)
 		if drops > 50 {
 			c.Logger.Info("client appears too slow; closing connection", zap.String("client", c.ID))
 			c.Close()
@@ -85,8 +96,14 @@ func (c *Client) ReadPump() {
 	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(appData string) error {
 		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		now := time.Now()
 		c.mu.Lock()
-		c.lastPong = time.Now()
+		c.lastPong = now
+		// observe latency if we have a ping timestamp
+		if !c.lastPing.IsZero() {
+			lat := now.Sub(c.lastPing)
+			metrics.ObservePongLatency(lat)
+		}
 		c.mu.Unlock()
 		return nil
 	})
@@ -167,12 +184,15 @@ func (c *Client) WritePump() {
 			}
 		case <-ticker.C:
 			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			// set ping timestamp
+			c.mu.Lock()
+			c.lastPing = time.Now()
+			c.mu.Unlock()
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
-			// record ping time (optional)
-			c.mu.Lock()
 			// if no pong received within 2*pongWait, close
+			c.mu.Lock()
 			if time.Since(c.lastPong) > 2*pongWait {
 				c.mu.Unlock()
 				c.Logger.Info("no pong seen recently; closing connection", zap.String("client", c.ID))
@@ -202,7 +222,7 @@ func (c *Client) Close() {
 
 // helper to call MarkActive safely via reflection-like interface assertion
 func tryMarkActive(pres interface{}, participant interface{}, roomName string) bool {
-	type marker interface{
+	type marker interface {
 		MarkActive(interface{}, string)
 	}
 	if m, ok := pres.(marker); ok {
@@ -210,7 +230,7 @@ func tryMarkActive(pres interface{}, participant interface{}, roomName string) b
 		return true
 	}
 	// try concrete type with correct signature
-	type m2 interface{
+	type m2 interface {
 		MarkActive(room.Participant, string)
 	}
 	if m, ok := pres.(m2); ok {

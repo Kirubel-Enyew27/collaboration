@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"collaboration/internal/metrics"
 	"sync"
 
 	"go.uber.org/zap"
@@ -36,6 +37,8 @@ func (h *Hub) Run() {
             h.mu.Lock()
             h.clients[c] = struct{}{}
             h.mu.Unlock()
+            // metrics
+            metrics.IncConnection()
             h.logger.Debug("client registered", zap.Int("client_count", h.Len()))
         case c := <-h.unregister:
             h.mu.Lock()
@@ -43,6 +46,7 @@ func (h *Hub) Run() {
                 delete(h.clients, c)
             }
             h.mu.Unlock()
+            metrics.DecConnection()
             h.logger.Debug("client unregistered", zap.Int("client_count", h.Len()))
         case <-h.done:
             h.logger.Info("hub shutting down")
@@ -97,6 +101,8 @@ func (h *Hub) RemoveClientByID(id string) *Client {
     for c := range h.clients {
         if c.ID == id {
             delete(h.clients, c)
+            // update metrics for immediate removal
+            metrics.DecConnection()
             return c
         }
     }

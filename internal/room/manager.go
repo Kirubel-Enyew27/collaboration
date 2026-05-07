@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"collaboration/internal/metrics"
 	"collaboration/internal/store"
 
 	"go.uber.org/zap"
@@ -57,6 +58,8 @@ func (m *Manager) CreateRoom(name string) error {
 		// best-effort persist
 		_ = m.repo.CreateRoom(context.Background(), name)
 	}
+	// metrics
+	metrics.SetRooms(float64(len(m.rooms)))
 	return nil
 }
 
@@ -74,8 +77,10 @@ func (m *Manager) Join(name string, p Participant) error {
 	}
 	r.participants[p.GetID()] = p
 	m.mu.Unlock()
-
 	m.logger.Debug("participant joined room", zap.String("room", name), zap.String("participant", p.GetID()))
+	// metrics
+	metrics.SetParticipantsTotal(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); count := 0; for _, rr := range m.rooms { count += len(rr.participants) }; return count }()))
+	metrics.SetParticipantsPerRoom(name, float64(len(r.participants)))
 	return nil
 }
 
@@ -96,6 +101,12 @@ func (m *Manager) Leave(name string, p Participant) error {
 			// best-effort delete persisted room
 			_ = m.repo.DeleteRoom(context.Background(), name)
 		}
+		metrics.SetRooms(float64(len(m.rooms)))
+	}
+	// update participants metrics
+	metrics.SetParticipantsTotal(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); count := 0; for _, rr := range m.rooms { count += len(rr.participants) }; return count }()))
+	if r != nil {
+		metrics.SetParticipantsPerRoom(name, float64(len(r.participants)))
 	}
 	return nil
 }
@@ -118,6 +129,7 @@ func (m *Manager) Broadcast(name string, message []byte) error {
 	for _, p := range participants {
 		p.SendMessage(message)
 	}
+	metrics.IncBroadcast(name)
 	return nil
 }
 
