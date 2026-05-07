@@ -33,7 +33,11 @@ func main() {
 
 
 	// Initialize persistence (SQLite)
-	sqldb, err := sqlite.NewSQLiteStore("./data.db")
+	dbPath := os.Getenv("DATABASE_PATH")
+	if dbPath == "" {
+		dbPath = "./data.db"
+	}
+	sqldb, err := sqlite.NewSQLiteStore(dbPath)
 	if err != nil {
 		log.Fatal("failed to open sqlite store", zap.Error(err))
 	}

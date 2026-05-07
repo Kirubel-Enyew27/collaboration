@@ -1,0 +1,8 @@
+bin/
+data.db
+vendor/
+.git
+.DS_Store
+node_modules
+*.log
+coverage.out
