@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"collaboration/internal/auth"
 	"collaboration/internal/events"
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
@@ -42,6 +43,12 @@ func main() {
 	// Event dispatcher
 	ed := events.NewDispatcher(rm, pres, st, log)
 
+	// Auth setup: read API keys from env or use default
+	apiKeys := map[string]string{}
+	// For now add a default dev key; in production read from secure store
+	apiKeys["dev-key"] = "dev-user"
+	authz := auth.New(apiKeys, log)
+
 	// Setup Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -52,11 +59,14 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Protected routes require API key
+	authGroup := r.Group("/", authz.Middleware())
+
 	// WebSocket endpoint (supports ?room=)
-	r.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
+	authGroup.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
 
 	// Room management endpoints
-	r.POST("/rooms", func(c *gin.Context) {
+	authGroup.POST("/rooms", func(c *gin.Context) {
 		var body struct {
 			Name string `json:"name"`
 		}
@@ -71,7 +81,7 @@ func main() {
 		c.Status(http.StatusCreated)
 	})
 
-	r.GET("/rooms/:room/participants", func(c *gin.Context) {
+	authGroup.GET("/rooms/:room/participants", func(c *gin.Context) {
 		roomName := c.Param("room")
 		ids, err := rm.Participants(roomName)
 		if err != nil {
