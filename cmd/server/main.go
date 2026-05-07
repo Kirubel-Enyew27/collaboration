@@ -3,6 +3,7 @@ package main
 import (
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
+	"collaboration/internal/room"
 	"collaboration/internal/ws"
 	"context"
 	"net/http"
@@ -22,6 +23,8 @@ func main() {
 	hub := ws.NewHub(log)
 	go hub.Run()
 
+	rm := room.NewManager(log)
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -30,7 +33,32 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.GET("/ws", handlers.NewWSHandler(hub, log))
+	r.GET("/ws", handlers.NewWSHandler(hub, rm, log))
+
+	r.POST("/rooms", func(c *gin.Context) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := c.BindJSON(&body); err != nil || body.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+			return
+		}
+		if err := rm.CreateRoom(body.Name); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.Status(http.StatusCreated)
+	})
+
+	r.GET("/rooms/:room/participants", func(c *gin.Context) {
+		roomName := c.Param("room")
+		ids, err := rm.Participants(roomName)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "room not found"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"participants": ids})
+	})
 
 	srv := &http.Server{
 		Addr:    ":8080",

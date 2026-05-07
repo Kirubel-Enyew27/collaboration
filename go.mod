@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	go.uber.org/zap v1.28.0
 )
