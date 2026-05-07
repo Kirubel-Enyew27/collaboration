@@ -31,6 +31,7 @@ type Manager struct {
 type Room struct {
 	name         string
 	participants map[string]Participant
+	mu           sync.RWMutex
 }
 
 // NewManager creates a room manager.
@@ -68,46 +69,82 @@ func (m *Manager) Join(name string, p Participant) error {
 	if name == "" {
 		return errors.New("room name required")
 	}
+	// get or create room under manager lock
 	m.mu.Lock()
 	r, ok := m.rooms[name]
 	if !ok {
 		r = &Room{name: name, participants: make(map[string]Participant)}
 		m.rooms[name] = r
 		m.logger.Info("room auto-created on join", zap.String("room", name))
+		if m.repo != nil {
+			_ = m.repo.CreateRoom(context.Background(), name)
+		}
+		metrics.SetRooms(float64(len(m.rooms)))
 	}
-	r.participants[p.GetID()] = p
 	m.mu.Unlock()
+
+	// add participant under room lock
+	r.mu.Lock()
+	r.participants[p.GetID()] = p
+	roomCount := len(r.participants)
+	r.mu.Unlock()
+
 	m.logger.Debug("participant joined room", zap.String("room", name), zap.String("participant", p.GetID()))
-	// metrics
-	metrics.SetParticipantsTotal(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); count := 0; for _, rr := range m.rooms { count += len(rr.participants) }; return count }()))
-	metrics.SetParticipantsPerRoom(name, float64(len(r.participants)))
+	// update metrics: per-room and global totals
+	metrics.SetParticipantsPerRoom(name, float64(roomCount))
+	total := 0
+	m.mu.RLock()
+	for _, rr := range m.rooms {
+		rr.mu.RLock()
+		total += len(rr.participants)
+		rr.mu.RUnlock()
+	}
+	m.mu.RUnlock()
+	metrics.SetParticipantsTotal(float64(total))
 	return nil
 }
 
 // Leave removes a participant from a room. If the room becomes empty it is deleted.
 func (m *Manager) Leave(name string, p Participant) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// find room
+	m.mu.RLock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil
 	}
+
+	r.mu.Lock()
 	delete(r.participants, p.GetID())
+	roomCount := len(r.participants)
+	r.mu.Unlock()
+
 	m.logger.Debug("participant left room", zap.String("room", name), zap.String("participant", p.GetID()))
-	if len(r.participants) == 0 {
-		delete(m.rooms, name)
-		m.logger.Info("room removed (empty)", zap.String("room", name))
-		if m.repo != nil {
-			// best-effort delete persisted room
-			_ = m.repo.DeleteRoom(context.Background(), name)
+
+	if roomCount == 0 {
+		m.mu.Lock()
+		if cur, ok := m.rooms[name]; ok && cur == r {
+			delete(m.rooms, name)
+			m.logger.Info("room removed (empty)", zap.String("room", name))
+			if m.repo != nil {
+				_ = m.repo.DeleteRoom(context.Background(), name)
+			}
 		}
-		metrics.SetRooms(float64(len(m.rooms)))
+		m.mu.Unlock()
+		metrics.SetRooms(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); return len(m.rooms) }()))
 	}
-	// update participants metrics
-	metrics.SetParticipantsTotal(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); count := 0; for _, rr := range m.rooms { count += len(rr.participants) }; return count }()))
-	if r != nil {
-		metrics.SetParticipantsPerRoom(name, float64(len(r.participants)))
+
+	// update metrics
+	total := 0
+	m.mu.RLock()
+	for _, rr := range m.rooms {
+		rr.mu.RLock()
+		total += len(rr.participants)
+		rr.mu.RUnlock()
 	}
+	m.mu.RUnlock()
+	metrics.SetParticipantsTotal(float64(total))
+	metrics.SetParticipantsPerRoom(name, float64(roomCount))
 	return nil
 }
 
@@ -115,16 +152,17 @@ func (m *Manager) Leave(name string, p Participant) error {
 func (m *Manager) Broadcast(name string, message []byte) error {
 	m.mu.RLock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
-		m.mu.RUnlock()
 		return errors.New("room not found")
 	}
-	// Copy participants slice under lock to avoid concurrent map iteration
+
+	r.mu.RLock()
 	participants := make([]Participant, 0, len(r.participants))
 	for _, p := range r.participants {
 		participants = append(participants, p)
 	}
-	m.mu.RUnlock()
+	r.mu.RUnlock()
 
 	for _, p := range participants {
 		p.SendMessage(message)
@@ -136,11 +174,13 @@ func (m *Manager) Broadcast(name string, message []byte) error {
 // Participants returns a slice of participant IDs for a room.
 func (m *Manager) Participants(name string) ([]string, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, errors.New("room not found")
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0, len(r.participants))
 	for id := range r.participants {
 		ids = append(ids, id)
