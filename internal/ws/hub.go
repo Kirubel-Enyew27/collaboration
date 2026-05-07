@@ -1,9 +1,9 @@
 package ws
 
 import (
-    "sync"
+	"sync"
 
-    "go.uber.org/zap"
+	"go.uber.org/zap"
 )
 
 // Hub maintains the set of active clients and broadcasts messages to the
@@ -75,6 +75,32 @@ func (h *Hub) Len() int {
     h.mu.RLock()
     defer h.mu.RUnlock()
     return len(h.clients)
+}
+
+// GetClientByID returns a connected client with the given id, or nil.
+func (h *Hub) GetClientByID(id string) *Client {
+    h.mu.RLock()
+    defer h.mu.RUnlock()
+    for c := range h.clients {
+        if c.ID == id {
+            return c
+        }
+    }
+    return nil
+}
+
+// RemoveClientByID removes the client with the given id from the hub and
+// returns it for further cleanup. Caller should call Close() on the client.
+func (h *Hub) RemoveClientByID(id string) *Client {
+    h.mu.Lock()
+    defer h.mu.Unlock()
+    for c := range h.clients {
+        if c.ID == id {
+            delete(h.clients, c)
+            return c
+        }
+    }
+    return nil
 }
 
 // Shutdown closes all client connections and stops the hub.

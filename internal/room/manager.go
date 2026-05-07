@@ -104,12 +104,18 @@ func (m *Manager) Leave(name string, p Participant) error {
 func (m *Manager) Broadcast(name string, message []byte) error {
 	m.mu.RLock()
 	r, ok := m.rooms[name]
-	m.mu.RUnlock()
 	if !ok {
+		m.mu.RUnlock()
 		return errors.New("room not found")
 	}
-
+	// Copy participants slice under lock to avoid concurrent map iteration
+	participants := make([]Participant, 0, len(r.participants))
 	for _, p := range r.participants {
+		participants = append(participants, p)
+	}
+	m.mu.RUnlock()
+
+	for _, p := range participants {
 		p.SendMessage(message)
 	}
 	return nil

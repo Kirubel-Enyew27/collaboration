@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -27,12 +28,49 @@ type Manager struct {
     rm     *room.Manager
     store  store.EventRepository
     logger *zap.Logger
+    // async persistence
+    persistQueue chan *store.Event
+    workers      int
+    wg           sync.WaitGroup
 }
 
 // NewManager creates a state manager that will use room.Manager for broadcasts.
 // Optionally accepts an EventRepository to persist updates.
 func NewManager(rm *room.Manager, logger *zap.Logger, repo store.EventRepository) *Manager {
-    return &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
+    m := &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
+    if repo != nil {
+        // configure worker count and queue size
+        workers := runtime.NumCPU()
+        if workers < 1 {
+            workers = 1
+        }
+        m.workers = workers
+        m.persistQueue = make(chan *store.Event, 1024)
+        // start workers
+        for i := 0; i < m.workers; i++ {
+            m.wg.Add(1)
+            go func() {
+                defer m.wg.Done()
+                for ev := range m.persistQueue {
+                    // best-effort persist with background context
+                    if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
+                        m.logger.Warn("worker failed persist event", zap.Error(err))
+                    }
+                }
+            }()
+        }
+    }
+    return m
+}
+
+// Shutdown stops background persistence workers and waits for flush.
+func (m *Manager) Shutdown() {
+    if m.persistQueue == nil {
+        return
+    }
+    // close queue and wait for workers to finish
+    close(m.persistQueue)
+    m.wg.Wait()
 }
 
 // ensureRoom gets or creates a RoomState.
@@ -80,12 +118,14 @@ func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, 
     newVersion := atomic.AddInt64(&r.version, 1)
     r.data = append(json.RawMessage(nil), payload...)
 
-    // persist event if store provided
-    if m.store != nil {
+    // enqueue persist event if store provided
+    if m.store != nil && m.persistQueue != nil {
         ev := &store.Event{Type: "update", Room: roomName, Payload: r.data, Version: newVersion}
-        // best-effort persist; log errors but continue
-        if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
-            m.logger.Warn("failed to persist event", zap.Error(err))
+        select {
+        case m.persistQueue <- ev:
+            // enqueued
+        default:
+            m.logger.Warn("persist queue full, dropping persist event", zap.String("room", roomName))
         }
     }
 

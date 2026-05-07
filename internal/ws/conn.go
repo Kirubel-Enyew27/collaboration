@@ -3,6 +3,7 @@ package ws
 import (
 	"collaboration/internal/events"
 	"collaboration/internal/room"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +29,11 @@ type Client struct {
 	OnClose func(*Client)
 	ED      *events.Dispatcher
 	Pres    interface{ MarkActive(room.Participant, string); MarkOnline(room.Participant, string); MarkOffline(room.Participant, string) }
+	// heartbeat and slow-client detection
+	lastPong  time.Time
+	dropCount int
+	mu        sync.Mutex
+	closeOnce sync.Once
 }
 
 // GetID returns the client's unique identifier (satisfies room.Participant).
@@ -50,8 +56,18 @@ func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger, ed *events.Di
 func (c *Client) SendMessage(b []byte) {
 	select {
 	case c.Send <- b:
+		// good
 	default:
-		c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID))
+		// slow client — increment drop counter and disconnect if too many
+		c.mu.Lock()
+		c.dropCount++
+		drops := c.dropCount
+		c.mu.Unlock()
+		c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID), zap.Int("drops", drops))
+		if drops > 50 {
+			c.Logger.Info("client appears too slow; closing connection", zap.String("client", c.ID))
+			c.Close()
+		}
 	}
 }
 
@@ -67,7 +83,13 @@ func (c *Client) ReadPump() {
 
 	c.Conn.SetReadLimit(maxMessageSize)
 	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.Conn.SetPongHandler(func(string) error { _ = c.Conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	c.Conn.SetPongHandler(func(appData string) error {
+		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.mu.Lock()
+		c.lastPong = time.Now()
+		c.mu.Unlock()
+		return nil
+	})
 
 	for {
 		_, message, err := c.Conn.ReadMessage()
@@ -114,12 +136,31 @@ func (c *Client) WritePump() {
 				return
 			}
 
+			// Batch messages to reduce syscalls: write first message, then drain
 			w, err := c.Conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				return
 			}
 			if _, err := w.Write(message); err != nil {
+				_ = w.Close()
 				return
+			}
+
+			// drain additional queued messages into same writer
+		drainLoop:
+			for {
+				select {
+				case msg := <-c.Send:
+					// separate messages by newline so clients can split if needed
+					if _, err := w.Write([]byte("\n")); err != nil {
+						break drainLoop
+					}
+					if _, err := w.Write(msg); err != nil {
+						break drainLoop
+					}
+				default:
+					break drainLoop
+				}
 			}
 			if err := w.Close(); err != nil {
 				return
@@ -129,20 +170,34 @@ func (c *Client) WritePump() {
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+			// record ping time (optional)
+			c.mu.Lock()
+			// if no pong received within 2*pongWait, close
+			if time.Since(c.lastPong) > 2*pongWait {
+				c.mu.Unlock()
+				c.Logger.Info("no pong seen recently; closing connection", zap.String("client", c.ID))
+				return
+			}
+			c.mu.Unlock()
 		}
 	}
 }
 
 // Close cleanly closes the client send channel to signal writePump to exit.
 func (c *Client) Close() {
-	select {
-	case <-c.Hub.done:
-		// hub already shutting down
-	default:
-		// proceed to close
-	}
-	// Close send to signal writer to exit
-	close(c.Send)
+	c.closeOnce.Do(func() {
+		select {
+		case <-c.Hub.done:
+			// hub already shutting down
+		default:
+		}
+		// Close send channel to signal writer to exit
+		// recover from double close just in case
+		defer func() {
+			_ = recover()
+		}()
+		close(c.Send)
+	})
 }
 
 // helper to call MarkActive safely via reflection-like interface assertion

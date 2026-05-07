@@ -31,7 +31,6 @@ func main() {
 	hub := ws.NewHub(log)
 	go hub.Run()
 
-
 	// Initialize persistence (SQLite)
 	dbPath := os.Getenv("DATABASE_PATH")
 	if dbPath == "" {
@@ -135,6 +134,9 @@ func main() {
 
 	// Shutdown presence manager
 	pres.Shutdown()
+
+	// Shutdown state manager (flush async persistence)
+	st.Shutdown()
 
 	log.Info("server exiting")
 }
