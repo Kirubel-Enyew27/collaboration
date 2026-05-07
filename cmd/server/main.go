@@ -13,6 +13,7 @@ import (
 	"collaboration/internal/logger"
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
+	"collaboration/internal/state"
 	"collaboration/internal/ws"
 
 	"github.com/gin-gonic/gin"
@@ -35,8 +36,11 @@ func main() {
 	pres := presence.NewManager(rm, log)
 	pres.Start()
 
+	// State manager
+	st := state.NewManager(rm, log)
+
 	// Event dispatcher
-	ed := events.NewDispatcher(rm, pres, log)
+	ed := events.NewDispatcher(rm, pres, st, log)
 
 	// Setup Gin
 	gin.SetMode(gin.ReleaseMode)
