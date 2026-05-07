@@ -8,8 +8,10 @@ import (
 	"syscall"
 	"time"
 
+	"collaboration/internal/events"
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
+	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/ws"
 
@@ -29,6 +31,13 @@ func main() {
 	// Room manager
 	rm := room.NewManager(log)
 
+	// Presence manager
+	pres := presence.NewManager(rm, log)
+	pres.Start()
+
+	// Event dispatcher
+	ed := events.NewDispatcher(rm, pres, log)
+
 	// Setup Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -40,7 +49,7 @@ func main() {
 	})
 
 	// WebSocket endpoint (supports ?room=)
-	r.GET("/ws", handlers.NewWSHandler(hub, rm, log))
+	r.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
 
 	// Room management endpoints
 	r.POST("/rooms", func(c *gin.Context) {
@@ -96,6 +105,9 @@ func main() {
 
 	// Close hub and all connections
 	hub.Shutdown()
+
+	// Shutdown presence manager
+	pres.Shutdown()
 
 	log.Info("server exiting")
 }
