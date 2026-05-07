@@ -35,9 +35,7 @@ func (h *Hub) Run() {
 			h.logger.Debug("client registered", zap.Int("client_count", h.Len()))
 		case c := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[c]; ok {
-				delete(h.clients, c)
-			}
+			delete(h.clients, c)
 			h.mu.Unlock()
 			h.logger.Debug("client unregistered", zap.Int("client_count", h.Len()))
 		case <-h.done:
