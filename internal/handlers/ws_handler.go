@@ -1,13 +1,14 @@
 package handlers
 
 import (
-    "net/http"
+	"net/http"
 
-    "collaboration/internal/ws"
+	"collaboration/internal/room"
+	"collaboration/internal/ws"
 
-    "github.com/gin-gonic/gin"
-    "github.com/gorilla/websocket"
-    "go.uber.org/zap"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 var upgrader = websocket.Upgrader{
@@ -21,7 +22,7 @@ var upgrader = websocket.Upgrader{
 
 // NewWSHandler returns a Gin handler that upgrades HTTP requests to WebSocket and
 // manages the client lifecycle with the provided hub.
-func NewWSHandler(hub *ws.Hub, logger *zap.Logger) gin.HandlerFunc {
+func NewWSHandler(hub *ws.Hub, rm *room.Manager, logger *zap.Logger) gin.HandlerFunc {
     return func(c *gin.Context) {
         conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
         if err != nil {
@@ -32,6 +33,13 @@ func NewWSHandler(hub *ws.Hub, logger *zap.Logger) gin.HandlerFunc {
 
         client := ws.NewClient(hub, conn, logger)
         hub.Register(client)
+
+        // If a room query parameter is provided, auto-join that room
+        if roomName := c.Query("room"); roomName != "" {
+            if err := rm.Join(roomName, client); err != nil {
+                logger.Warn("failed to join room", zap.String("room", roomName), zap.Error(err))
+            }
+        }
 
         // Start read and write pumps
         go client.WritePump()

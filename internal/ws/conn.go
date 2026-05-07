@@ -3,56 +3,73 @@ package ws
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
 const (
-    writeWait = 10 * time.Second
-    pongWait  = 60 * time.Second
-    pingPeriod = (pongWait * 9) / 10
+    writeWait      = 10 * time.Second
+    pongWait       = 60 * time.Second
+    pingPeriod     = (pongWait * 9) / 10
     maxMessageSize = 512
 )
 
 // Client represents a single WebSocket connection.
 type Client struct {
-    hub    *Hub
-    conn   *websocket.Conn
-    send   chan []byte
-    logger *zap.Logger
+    ID      string
+    Hub     *Hub
+    Conn    *websocket.Conn
+    Send    chan []byte
+    Logger  *zap.Logger
+    Room    string
+    OnClose func(*Client)
 }
 
 // NewClient constructs a client and registers it with the hub.
 func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger) *Client {
     return &Client{
-        hub:    hub,
-        conn:   conn,
-        send:   make(chan []byte, 256),
-        logger: logger,
+        ID:     uuid.New().String(),
+        Hub:    hub,
+        Conn:   conn,
+        Send:   make(chan []byte, 256),
+        Logger: logger,
+    }
+}
+
+// SendMessage attempts to enqueue a message to the client without blocking.
+func (c *Client) SendMessage(b []byte) {
+    select {
+    case c.Send <- b:
+    default:
+        c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID))
     }
 }
 
 // ReadPump reads messages from the WebSocket connection.
 func (c *Client) ReadPump() {
     defer func() {
-        c.hub.Unregister(c)
-        c.conn.Close()
+        c.Hub.Unregister(c)
+        if c.OnClose != nil {
+            c.OnClose(c)
+        }
+        c.Conn.Close()
     }()
 
-    c.conn.SetReadLimit(maxMessageSize)
-    _ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
-    c.conn.SetPongHandler(func(string) error { _ = c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+    c.Conn.SetReadLimit(maxMessageSize)
+    _ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+    c.Conn.SetPongHandler(func(string) error { _ = c.Conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
     for {
-        _, message, err := c.conn.ReadMessage()
+        _, message, err := c.Conn.ReadMessage()
         if err != nil {
             if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-                c.logger.Warn("unexpected websocket close", zap.Error(err))
+                c.Logger.Warn("unexpected websocket close", zap.Error(err))
             }
             break
         }
         // For foundation, just log incoming messages
-        c.logger.Debug("received message", zap.Int("len", len(message)))
+        c.Logger.Debug("received message", zap.Int("len", len(message)), zap.String("client", c.ID))
     }
 }
 
@@ -61,20 +78,20 @@ func (c *Client) WritePump() {
     ticker := time.NewTicker(pingPeriod)
     defer func() {
         ticker.Stop()
-        c.conn.Close()
+        c.Conn.Close()
     }()
 
     for {
         select {
-        case message, ok := <-c.send:
-            _ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+        case message, ok := <-c.Send:
+            _ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
             if !ok {
                 // Hub closed the channel
-                _ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+                _ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
                 return
             }
 
-            w, err := c.conn.NextWriter(websocket.TextMessage)
+            w, err := c.Conn.NextWriter(websocket.TextMessage)
             if err != nil {
                 return
             }
@@ -85,8 +102,8 @@ func (c *Client) WritePump() {
                 return
             }
         case <-ticker.C:
-            _ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-            if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+            _ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+            if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
                 return
             }
         }
@@ -96,11 +113,11 @@ func (c *Client) WritePump() {
 // Close cleanly closes the client send channel to signal writePump to exit.
 func (c *Client) Close() {
     select {
-    case <-c.hub.done:
+    case <-c.Hub.done:
         // hub already shutting down
     default:
         // proceed to close
     }
     // Close send to signal writer to exit
-    close(c.send)
+    close(c.Send)
 }
