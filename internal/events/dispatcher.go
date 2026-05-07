@@ -3,6 +3,7 @@ package events
 import (
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
+	"collaboration/internal/state"
 	"encoding/json"
 
 	"go.uber.org/zap"
@@ -11,11 +12,12 @@ import (
 type Dispatcher struct {
 	RM     *room.Manager
 	Pres   *presence.Manager
+	State  *state.Manager
 	Logger *zap.Logger
 }
 
-func NewDispatcher(rm *room.Manager, pres *presence.Manager, logger *zap.Logger) *Dispatcher {
-	return &Dispatcher{RM: rm, Pres: pres, Logger: logger}
+func NewDispatcher(rm *room.Manager, pres *presence.Manager, st *state.Manager, logger *zap.Logger) *Dispatcher {
+	return &Dispatcher{RM: rm, Pres: pres, State: st, Logger: logger}
 }
 
 func (d *Dispatcher) Dispatch(p room.Participant, raw []byte) error {

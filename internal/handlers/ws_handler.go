@@ -22,6 +22,11 @@ var upgrader = websocket.Upgrader{
 
 func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *presence.Manager, logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := c.Get("auth_user"); !ok {
+			logger.Warn("websocket connection unauthorized (no auth_user in context)")
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			logger.Warn("failed to upgrade websocket", zap.Error(err))

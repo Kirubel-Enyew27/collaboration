@@ -1,11 +1,13 @@
 package main
 
 import (
+	"collaboration/internal/auth"
 	"collaboration/internal/events"
 	"collaboration/internal/handlers"
 	"collaboration/internal/logger"
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
+	"collaboration/internal/state"
 	"collaboration/internal/ws"
 	"context"
 	"net/http"
@@ -30,19 +32,23 @@ func main() {
 	pres := presence.NewManager(rm, log)
 	pres.Start()
 
-	ed := events.NewDispatcher(rm, pres, log)
+	st := state.NewManager(rm, log)
+
+	ed := events.NewDispatcher(rm, pres, st, log)
+
+	apiKeys := map[string]string{}
+	apiKeys["dev-key"] = "dev-user"
+	authz := auth.New(apiKeys, log)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	authGroup := r.Group("/", authz.Middleware())
 
-	r.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
+	authGroup.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
 
-	r.POST("/rooms", func(c *gin.Context) {
+	authGroup.POST("/rooms", func(c *gin.Context) {
 		var body struct {
 			Name string `json:"name"`
 		}
@@ -57,7 +63,7 @@ func main() {
 		c.Status(http.StatusCreated)
 	})
 
-	r.GET("/rooms/:room/participants", func(c *gin.Context) {
+	authGroup.GET("/rooms/:room/participants", func(c *gin.Context) {
 		roomName := c.Param("room")
 		ids, err := rm.Participants(roomName)
 		if err != nil {
