@@ -108,5 +108,7 @@ func main() {
 
 	pres.Shutdown()
 
+	st.Shutdown()
+
 	log.Info("server exiting")
 }

@@ -3,6 +3,7 @@ package ws
 import (
 	"collaboration/internal/events"
 	"collaboration/internal/room"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,10 @@ type Client struct {
 		MarkOnline(room.Participant, string)
 		MarkOffline(room.Participant, string)
 	}
+	lastLong  time.Time
+	dropCount int
+	mu        sync.Mutex
+	closeOnce sync.Once
 }
 
 func (c *Client) GetID() string { return c.ID }
@@ -56,7 +61,15 @@ func (c *Client) SendMessage(b []byte) {
 	select {
 	case c.Send <- b:
 	default:
-		c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID))
+		c.mu.Lock()
+		c.dropCount++
+		drops := c.dropCount
+		c.mu.Unlock()
+		c.Logger.Warn("dropping message to client; send buffer full", zap.String("client", c.ID), zap.Int("drops", drops))
+		if drops > 0 {
+			c.Logger.Info("client appears too low; closing connection", zap.String("client", c.ID))
+			c.Close()
+		}
 	}
 }
 
@@ -71,8 +84,11 @@ func (c *Client) ReadPump() {
 
 	c.Conn.SetReadLimit(maxMessageSize)
 	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.Conn.SetPongHandler(func(string) error {
+	c.Conn.SetPongHandler(func(appData string) error {
 		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.mu.Lock()
+		c.lastLong = time.Now()
+		c.mu.Unlock()
 		return nil
 	})
 
@@ -122,7 +138,23 @@ func (c *Client) WritePump() {
 				return
 			}
 			if _, err := w.Write(message); err != nil {
+				_ = w.Close()
 				return
+			}
+
+		drainLoop:
+			for {
+				select {
+				case msg := <-c.Send:
+					if _, err := w.Write([]byte("\n")); err != nil {
+						break drainLoop
+					}
+					if _, err := w.Write(msg); err != nil {
+						break drainLoop
+					}
+				default:
+					break drainLoop
+				}
 			}
 			if err := w.Close(); err != nil {
 				return
@@ -132,16 +164,26 @@ func (c *Client) WritePump() {
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+			c.mu.Lock()
+			if time.Since(c.lastLong) > 2*pongWait {
+				c.mu.Unlock()
+				c.Logger.Info("no pong seen recently; closing connection", zap.String("client", c.ID))
+				return
+			}
+			c.mu.Unlock()
 		}
 	}
 }
 
 func (c *Client) Close() {
-	select {
-	case <-c.Hub.done:
-	default:
-	}
-	close(c.Send)
+	c.closeOnce.Do(func() {
+
+		select {
+		case <-c.Hub.done:
+		default:
+		}
+		close(c.Send)
+	})
 }
 
 func tryMarkActive(pres interface{}, participant interface{}, roomName string) bool {

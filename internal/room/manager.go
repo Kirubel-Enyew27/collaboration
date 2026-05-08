@@ -18,7 +18,7 @@ type Manager struct {
 	mu     sync.RWMutex
 	rooms  map[string]*Room
 	logger *zap.Logger
-	repo store.RoomRepository
+	repo   store.RoomRepository
 }
 
 type Room struct {
@@ -30,7 +30,7 @@ func NewManager(logger *zap.Logger, repo store.RoomRepository) *Manager {
 	return &Manager{
 		rooms:  make(map[string]*Room),
 		logger: logger,
-		repo: repo,
+		repo:   repo,
 	}
 }
 
@@ -99,10 +99,16 @@ func (m *Manager) Leave(name string, p Participant) error {
 func (m *Manager) Broadcast(name string, message []byte) error {
 	m.mu.RLock()
 	r, ok := m.rooms[name]
-	m.mu.RUnlock()
 	if !ok {
+		m.mu.RUnlock()
 		return errors.New("room not found")
 	}
+
+	participants := make([]Participant, 0, len(r.participants))
+	for _, p := range r.participants {
+		participants = append(participants, p)
+	}
+	m.mu.RUnlock()
 
 	for _, p := range r.participants {
 		p.SendMessage(message)

@@ -81,3 +81,26 @@ func (h *Hub) Shutdown() {
 		c.Close()
 	}
 }
+
+func (h *Hub) GetClientByID(id string) *Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if c.ID == id {
+			return c
+		}
+	}
+	return nil
+}
+
+func (h *Hub) RemoveClientByID(id string) *Client {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.ID == id {
+			delete(h.clients, c)
+			return c
+		}
+	}
+	return nil
+}

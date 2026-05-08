@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -19,15 +20,47 @@ type RoomState struct {
 }
 
 type Manager struct {
-	mu     sync.RWMutex
-	rooms  map[string]*RoomState
-	rm     *room.Manager
-	store  store.EventRepository
-	logger *zap.Logger
+	mu           sync.RWMutex
+	rooms        map[string]*RoomState
+	rm           *room.Manager
+	store        store.EventRepository
+	logger       *zap.Logger
+	persistQueue chan *store.Event
+	workers      int
+	wg           sync.WaitGroup
 }
 
 func NewManager(rm *room.Manager, logger *zap.Logger, repo store.EventRepository) *Manager {
-	return &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
+	m := &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
+	if repo != nil {
+		workers := runtime.NumCPU()
+		if workers < 1 {
+			workers = 1
+		}
+		m.workers = workers
+		m.persistQueue = make(chan *store.Event, 1024)
+		for i := 0; i < m.workers; i++ {
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				for ev := range m.persistQueue {
+					if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
+						m.logger.Warn("worker failed persistent event", zap.Error(err))
+					}
+				}
+			}()
+		}
+	}
+	return m
+}
+
+func (m *Manager) Shutdown() {
+	if m.persistQueue == nil {
+		return
+	}
+
+	close(m.persistQueue)
+	m.wg.Wait()
 }
 
 func (m *Manager) ensureRoom(name string) *RoomState {
@@ -69,10 +102,12 @@ func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, 
 	newVersion := atomic.AddInt64(&r.version, 1)
 	r.data = append(json.RawMessage(nil), payload...)
 
-	if m.store != nil {
+	if m.store != nil && m.persistQueue != nil {
 		ev := &store.Event{Type: "update", Room: roomName, Payload: r.data, Version: newVersion}
-		if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
-			m.logger.Warn("failed to persist event", zap.Error(err))
+		select {
+		case m.persistQueue <- ev:
+		default:
+			m.logger.Warn("persist queue full. dropping persist event", zap.String("room", roomName))
 		}
 	}
 

@@ -33,8 +33,19 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 			c.AbortWithStatus(http.StatusBadRequest)
 			return
 		}
+		clientID := c.Query("client_id")
+		if clientID != "" {
+			if removed := hub.RemoveClientByID(clientID); removed != nil {
+				logger.Info("removed existing client with same id", zap.String("client", clientID))
+				removed.Close()
+
+			}
+		}
 
 		client := ws.NewClient(hub, conn, logger, ed, pres)
+		if clientID != "" {
+			client.ID = clientID
+		}
 		hub.Register(client)
 
 		if pres != nil {
