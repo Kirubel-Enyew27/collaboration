@@ -2,6 +2,8 @@ package state
 
 import (
 	"collaboration/internal/room"
+	"collaboration/internal/store"
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -20,11 +22,12 @@ type Manager struct {
 	mu     sync.RWMutex
 	rooms  map[string]*RoomState
 	rm     *room.Manager
+	store  store.EventRepository
 	logger *zap.Logger
 }
 
-func NewManager(rm *room.Manager, logger *zap.Logger) *Manager {
-	return &Manager{rooms: make(map[string]*RoomState), rm: rm, logger: logger}
+func NewManager(rm *room.Manager, logger *zap.Logger, repo store.EventRepository) *Manager {
+	return &Manager{rooms: make(map[string]*RoomState), rm: rm, store: repo, logger: logger}
 }
 
 func (m *Manager) ensureRoom(name string) *RoomState {
@@ -65,6 +68,13 @@ func (m *Manager) ApplyUpdate(roomName string, payload json.RawMessage) (int64, 
 
 	newVersion := atomic.AddInt64(&r.version, 1)
 	r.data = append(json.RawMessage(nil), payload...)
+
+	if m.store != nil {
+		ev := &store.Event{Type: "update", Room: roomName, Payload: r.data, Version: newVersion}
+		if _, err := m.store.AppendEvent(context.Background(), ev); err != nil {
+			m.logger.Warn("failed to persist event", zap.Error(err))
+		}
+	}
 
 	envelope := map[string]any{
 		"type":    "update",

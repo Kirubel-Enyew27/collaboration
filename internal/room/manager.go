@@ -1,6 +1,8 @@
 package room
 
 import (
+	"collaboration/internal/store"
+	"context"
 	"errors"
 	"sync"
 
@@ -16,6 +18,7 @@ type Manager struct {
 	mu     sync.RWMutex
 	rooms  map[string]*Room
 	logger *zap.Logger
+	repo store.RoomRepository
 }
 
 type Room struct {
@@ -23,10 +26,11 @@ type Room struct {
 	participants map[string]Participant
 }
 
-func NewManager(logger *zap.Logger) *Manager {
+func NewManager(logger *zap.Logger, repo store.RoomRepository) *Manager {
 	return &Manager{
 		rooms:  make(map[string]*Room),
 		logger: logger,
+		repo: repo,
 	}
 }
 
@@ -44,6 +48,9 @@ func (m *Manager) CreateRoom(name string) error {
 		participants: make(map[string]Participant),
 	}
 	m.logger.Info("room created", zap.String("room", name))
+	if m.repo != nil {
+		_ = m.repo.CreateRoom(context.Background(), name)
+	}
 	return nil
 }
 
@@ -82,6 +89,9 @@ func (m *Manager) Leave(name string, p Participant) error {
 	if len(r.participants) == 0 {
 		delete(m.rooms, name)
 		m.logger.Info("room removed", zap.String("room", name))
+		if m.repo != nil {
+			_ = m.repo.DeleteRoom(context.Background(), name)
+		}
 	}
 	return nil
 }

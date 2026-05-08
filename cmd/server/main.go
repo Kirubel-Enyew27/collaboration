@@ -8,6 +8,7 @@ import (
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/state"
+	"collaboration/internal/store/sqlite"
 	"collaboration/internal/ws"
 	"context"
 	"net/http"
@@ -27,12 +28,18 @@ func main() {
 	hub := ws.NewHub(log)
 	go hub.Run()
 
-	rm := room.NewManager(log)
+	sqldb, err := sqlite.NewSQLiteStore("./data.db")
+	if err != nil {
+		log.Fatal("failed to open sqlite store", zap.Error(err))
+	}
+	defer sqldb.Close()
+
+	rm := room.NewManager(log, sqldb)
 
 	pres := presence.NewManager(rm, log)
 	pres.Start()
 
-	st := state.NewManager(rm, log)
+	st := state.NewManager(rm, log, sqldb)
 
 	ed := events.NewDispatcher(rm, pres, st, log)
 
