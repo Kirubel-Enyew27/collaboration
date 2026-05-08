@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Dispatcher routes events to the appropriate handlers (rooms, broadcasts, etc.).
 type Dispatcher struct {
 	RM     *room.Manager
 	Pres   *presence.Manager
@@ -16,10 +17,12 @@ type Dispatcher struct {
 	Logger *zap.Logger
 }
 
+// NewDispatcher creates an event dispatcher.
 func NewDispatcher(rm *room.Manager, pres *presence.Manager, st *state.Manager, logger *zap.Logger) *Dispatcher {
 	return &Dispatcher{RM: rm, Pres: pres, State: st, Logger: logger}
 }
 
+// Dispatch parses and handles a raw incoming message for the given participant.
 func (d *Dispatcher) Dispatch(p room.Participant, raw []byte) error {
 	ev, err := Parse(raw)
 	if err != nil {
@@ -40,8 +43,31 @@ func (d *Dispatcher) Dispatch(p room.Participant, raw []byte) error {
 		return nil
 	case EventLeave:
 		d.Logger.Debug("dispatch leave", zap.String("room", ev.Room), zap.String("participant", pid))
+		if err := d.RM.Leave(ev.Room, p); err != nil {
+			return err
+		}
+		if d.Pres != nil {
+			d.Pres.MarkOffline(p, ev.Room)
+		}
+		return nil
+	case EventUpdate:
+		d.Logger.Debug("dispatch update", zap.String("room", ev.Room), zap.String("participant", pid))
 		if d.Pres != nil {
 			d.Pres.MarkActive(p, ev.Room)
+		}
+		if d.State != nil {
+			_, _, err := d.State.ApplyUpdate(ev.Room, ev.Payload)
+			return err
+		}
+		return d.RM.Broadcast(ev.Room, ev.Payload)
+	case EventBroadcast:
+		d.Logger.Debug("dispatch broadcast", zap.String("room", ev.Room), zap.String("participant", pid))
+		if d.Pres != nil {
+			d.Pres.MarkActive(p, ev.Room)
+		}
+		if d.State != nil {
+			_, _, err := d.State.ApplyUpdate(ev.Room, ev.Payload)
+			return err
 		}
 		return d.RM.Broadcast(ev.Room, ev.Payload)
 	default:
@@ -50,6 +76,7 @@ func (d *Dispatcher) Dispatch(p room.Participant, raw []byte) error {
 	return nil
 }
 
+// Helper: decode payload into a target structure
 func (d *Dispatcher) DecodePayload(raw json.RawMessage, v any) error {
 	return json.Unmarshal(raw, v)
 }

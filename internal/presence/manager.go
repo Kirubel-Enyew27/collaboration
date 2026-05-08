@@ -1,10 +1,11 @@
 package presence
 
 import (
-	"collaboration/internal/room"
 	"encoding/json"
 	"sync"
 	"time"
+
+	"collaboration/internal/room"
 
 	"go.uber.org/zap"
 )
@@ -24,6 +25,7 @@ type record struct {
 	lastActive  time.Time
 }
 
+// Manager tracks presence state and broadcasts presence updates to rooms.
 type Manager struct {
 	mu           sync.RWMutex
 	records      map[string]*record
@@ -35,6 +37,7 @@ type Manager struct {
 	stop         chan struct{}
 }
 
+// NewManager creates a presence manager.
 func NewManager(rm *room.Manager, logger *zap.Logger) *Manager {
 	return &Manager{
 		records:      make(map[string]*record),
@@ -46,6 +49,7 @@ func NewManager(rm *room.Manager, logger *zap.Logger) *Manager {
 	}
 }
 
+// Start begins the background idle/stale checker.
 func (m *Manager) Start() {
 	if m.ticker != nil {
 		return
@@ -54,6 +58,7 @@ func (m *Manager) Start() {
 	go m.run()
 }
 
+// Shutdown stops the background checker.
 func (m *Manager) Shutdown() {
 	if m.ticker != nil {
 		m.ticker.Stop()
@@ -96,6 +101,7 @@ func (m *Manager) check() {
 	m.mu.Unlock()
 }
 
+// MarkOnline registers participant as online and broadcasts presence.
 func (m *Manager) MarkOnline(p room.Participant, roomName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -111,6 +117,7 @@ func (m *Manager) MarkOnline(p room.Participant, roomName string) {
 	m.publish(rec)
 }
 
+// MarkOffline marks the participant offline and broadcasts presence.
 func (m *Manager) MarkOffline(p room.Participant, roomName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,16 +132,14 @@ func (m *Manager) MarkOffline(p room.Participant, roomName string) {
 	}
 }
 
+// MarkActive updates the lastActive timestamp and broadcasts if needed.
 func (m *Manager) MarkActive(p room.Participant, roomName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id := p.GetID()
 	rec, ok := m.records[id]
 	if !ok {
-		rec = &record{
-			participant: p,
-			room:        roomName,
-		}
+		rec = &record{participant: p, room: roomName}
 		m.records[id] = rec
 	}
 	rec.lastActive = time.Now()
@@ -144,6 +149,7 @@ func (m *Manager) MarkActive(p room.Participant, roomName string) {
 	m.publish(rec)
 }
 
+// publish sends a presence update to the participant's room via room.Manager.Broadcast.
 func (m *Manager) publish(r *record) {
 	if r.room == "" || m.rm == nil {
 		return

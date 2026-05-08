@@ -1,15 +1,6 @@
 package main
 
 import (
-	"collaboration/internal/auth"
-	"collaboration/internal/events"
-	"collaboration/internal/handlers"
-	"collaboration/internal/logger"
-	"collaboration/internal/presence"
-	"collaboration/internal/room"
-	"collaboration/internal/state"
-	"collaboration/internal/store/sqlite"
-	"collaboration/internal/ws"
 	"context"
 	"net/http"
 	"os"
@@ -17,44 +8,84 @@ import (
 	"syscall"
 	"time"
 
+	"collaboration/internal/auth"
+	"collaboration/internal/events"
+	"collaboration/internal/handlers"
+	"collaboration/internal/logger"
+	"collaboration/internal/metrics"
+	"collaboration/internal/presence"
+	"collaboration/internal/room"
+	"collaboration/internal/state"
+	"collaboration/internal/store/sqlite"
+	"collaboration/internal/ws"
+
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
 func main() {
+	// Initialize logger
 	log := logger.NewLogger()
 	defer log.Sync()
 
+	// Register metrics
+	metrics.Register()
+
+	// Create hub and run it
 	hub := ws.NewHub(log)
 	go hub.Run()
 
-	sqldb, err := sqlite.NewSQLiteStore("./data.db")
+	// Initialize persistence (SQLite)
+	dbPath := os.Getenv("DATABASE_PATH")
+	if dbPath == "" {
+		dbPath = "./data.db"
+	}
+	sqldb, err := sqlite.NewSQLiteStore(dbPath)
 	if err != nil {
 		log.Fatal("failed to open sqlite store", zap.Error(err))
 	}
 	defer sqldb.Close()
 
+	// Room manager (backed by store)
 	rm := room.NewManager(log, sqldb)
 
+	// Presence manager
 	pres := presence.NewManager(rm, log)
 	pres.Start()
 
+	// State manager (persist events)
 	st := state.NewManager(rm, log, sqldb)
 
+	// Event dispatcher
 	ed := events.NewDispatcher(rm, pres, st, log)
 
+	// Auth setup: read API keys from env or use default
 	apiKeys := map[string]string{}
+	// For now add a default dev key; in production read from secure store
 	apiKeys["dev-key"] = "dev-user"
 	authz := auth.New(apiKeys, log)
 
+	// Setup Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Health endpoint
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	// Prometheus metrics endpoint
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Protected routes require API key
 	authGroup := r.Group("/", authz.Middleware())
 
+	// WebSocket endpoint (supports ?room=)
 	authGroup.GET("/ws", handlers.NewWSHandler(hub, rm, ed, pres, log))
 
+	// Room management endpoints
 	authGroup.POST("/rooms", func(c *gin.Context) {
 		var body struct {
 			Name string `json:"name"`
@@ -85,6 +116,7 @@ func main() {
 		Handler: r,
 	}
 
+	// Start server
 	go func() {
 		log.Info("starting server", zap.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -92,6 +124,7 @@ func main() {
 		}
 	}()
 
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -104,10 +137,13 @@ func main() {
 		log.Error("server forced to shutdown", zap.Error(err))
 	}
 
+	// Close hub and all connections
 	hub.Shutdown()
 
+	// Shutdown presence manager
 	pres.Shutdown()
 
+	// Shutdown state manager (flush async persistence)
 	st.Shutdown()
 
 	log.Info("server exiting")

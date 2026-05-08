@@ -1,19 +1,25 @@
 package room
 
 import (
-	"collaboration/internal/store"
 	"context"
 	"errors"
 	"sync"
 
+	"collaboration/internal/metrics"
+	"collaboration/internal/store"
+
 	"go.uber.org/zap"
 )
 
+// Participant represents the minimal behavior required by the room manager.
+// Implemented by types in other packages (e.g. ws.Client) without creating
+// an import cycle.
 type Participant interface {
 	GetID() string
 	SendMessage([]byte)
 }
 
+// Manager manages multiple rooms and their participants.
 type Manager struct {
 	mu     sync.RWMutex
 	rooms  map[string]*Room
@@ -21,11 +27,14 @@ type Manager struct {
 	repo   store.RoomRepository
 }
 
+// Room represents a collaboration room with participants keyed by participant ID.
 type Room struct {
 	name         string
 	participants map[string]Participant
+	mu           sync.RWMutex
 }
 
+// NewManager creates a room manager.
 func NewManager(logger *zap.Logger, repo store.RoomRepository) *Manager {
 	return &Manager{
 		rooms:  make(map[string]*Room),
@@ -34,6 +43,7 @@ func NewManager(logger *zap.Logger, repo store.RoomRepository) *Manager {
 	}
 }
 
+// CreateRoom creates a room if it doesn't already exist.
 func (m *Manager) CreateRoom(name string) error {
 	if name == "" {
 		return errors.New("room name required")
@@ -43,86 +53,134 @@ func (m *Manager) CreateRoom(name string) error {
 	if _, ok := m.rooms[name]; ok {
 		return nil
 	}
-	m.rooms[name] = &Room{
-		name:         name,
-		participants: make(map[string]Participant),
-	}
+	m.rooms[name] = &Room{name: name, participants: make(map[string]Participant)}
 	m.logger.Info("room created", zap.String("room", name))
 	if m.repo != nil {
+		// best-effort persist
 		_ = m.repo.CreateRoom(context.Background(), name)
 	}
+	// metrics
+	metrics.SetRooms(float64(len(m.rooms)))
 	return nil
 }
 
+// Join adds a participant to the named room, creating the room if necessary.
 func (m *Manager) Join(name string, p Participant) error {
 	if name == "" {
 		return errors.New("room name required")
 	}
+	// get or create room under manager lock
 	m.mu.Lock()
 	r, ok := m.rooms[name]
 	if !ok {
-		r = &Room{
-			name:         name,
-			participants: make(map[string]Participant),
-		}
+		r = &Room{name: name, participants: make(map[string]Participant)}
 		m.rooms[name] = r
 		m.logger.Info("room auto-created on join", zap.String("room", name))
+		if m.repo != nil {
+			_ = m.repo.CreateRoom(context.Background(), name)
+		}
+		metrics.SetRooms(float64(len(m.rooms)))
 	}
-	r.participants[p.GetID()] = p
 	m.mu.Unlock()
 
+	// add participant under room lock
+	r.mu.Lock()
+	r.participants[p.GetID()] = p
+	roomCount := len(r.participants)
+	r.mu.Unlock()
+
 	m.logger.Debug("participant joined room", zap.String("room", name), zap.String("participant", p.GetID()))
+	// update metrics: per-room and global totals
+	metrics.SetParticipantsPerRoom(name, float64(roomCount))
+	total := 0
+	m.mu.RLock()
+	for _, rr := range m.rooms {
+		rr.mu.RLock()
+		total += len(rr.participants)
+		rr.mu.RUnlock()
+	}
+	m.mu.RUnlock()
+	metrics.SetParticipantsTotal(float64(total))
 	return nil
 }
 
+// Leave removes a participant from a room. If the room becomes empty it is deleted.
 func (m *Manager) Leave(name string, p Participant) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// find room
+	m.mu.RLock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil
 	}
-	delete(r.participants, p.GetID())
-	m.logger.Debug("participant left room", zap.String("room", name),
-		zap.String("participant", p.GetID()))
 
-	if len(r.participants) == 0 {
-		delete(m.rooms, name)
-		m.logger.Info("room removed", zap.String("room", name))
-		if m.repo != nil {
-			_ = m.repo.DeleteRoom(context.Background(), name)
+	r.mu.Lock()
+	delete(r.participants, p.GetID())
+	roomCount := len(r.participants)
+	r.mu.Unlock()
+
+	m.logger.Debug("participant left room", zap.String("room", name), zap.String("participant", p.GetID()))
+
+	if roomCount == 0 {
+		m.mu.Lock()
+		if cur, ok := m.rooms[name]; ok && cur == r {
+			delete(m.rooms, name)
+			m.logger.Info("room removed (empty)", zap.String("room", name))
+			if m.repo != nil {
+				_ = m.repo.DeleteRoom(context.Background(), name)
+			}
 		}
+		m.mu.Unlock()
+		metrics.SetRooms(float64(func() int { m.mu.RLock(); defer m.mu.RUnlock(); return len(m.rooms) }()))
 	}
+
+	// update metrics
+	total := 0
+	m.mu.RLock()
+	for _, rr := range m.rooms {
+		rr.mu.RLock()
+		total += len(rr.participants)
+		rr.mu.RUnlock()
+	}
+	m.mu.RUnlock()
+	metrics.SetParticipantsTotal(float64(total))
+	metrics.SetParticipantsPerRoom(name, float64(roomCount))
 	return nil
 }
 
+// Broadcast sends a message to all participants in the room.
 func (m *Manager) Broadcast(name string, message []byte) error {
 	m.mu.RLock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
-		m.mu.RUnlock()
 		return errors.New("room not found")
 	}
 
+	r.mu.RLock()
 	participants := make([]Participant, 0, len(r.participants))
 	for _, p := range r.participants {
 		participants = append(participants, p)
 	}
-	m.mu.RUnlock()
+	r.mu.RUnlock()
 
-	for _, p := range r.participants {
+	for _, p := range participants {
 		p.SendMessage(message)
 	}
+	metrics.IncBroadcast(name)
 	return nil
 }
 
+// Participants returns a slice of participant IDs for a room.
 func (m *Manager) Participants(name string) ([]string, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	r, ok := m.rooms[name]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, errors.New("room not found")
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0, len(r.participants))
 	for id := range r.participants {
 		ids = append(ids, id)

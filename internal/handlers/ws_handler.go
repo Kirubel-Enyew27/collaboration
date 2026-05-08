@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"net/http"
+
 	"collaboration/internal/events"
 	"collaboration/internal/presence"
 	"collaboration/internal/room"
 	"collaboration/internal/ws"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -16,12 +17,16 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
+		// TODO: use proper origin checks for production
 		return true
 	},
 }
 
+// NewWSHandler returns a Gin handler that upgrades HTTP requests to WebSocket and
+// manages the client lifecycle with the provided hub.
 func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *presence.Manager, logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Ensure middleware set auth_user
 		if _, ok := c.Get("auth_user"); !ok {
 			logger.Warn("websocket connection unauthorized (no auth_user in context)")
 			c.AbortWithStatus(http.StatusUnauthorized)
@@ -33,12 +38,14 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 			c.AbortWithStatus(http.StatusBadRequest)
 			return
 		}
+
+		// Support reconnection: client can present a `client_id` to resume.
 		clientID := c.Query("client_id")
 		if clientID != "" {
 			if removed := hub.RemoveClientByID(clientID); removed != nil {
 				logger.Info("removed existing client with same id", zap.String("client", clientID))
+				// ensure old client resources are cleaned up
 				removed.Close()
-
 			}
 		}
 
@@ -49,13 +56,15 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 		hub.Register(client)
 
 		if pres != nil {
-			pres.MarkOnline(client, "k")
+			pres.MarkOnline(client, "")
 		}
 
+		// If a room query parameter is provided, auto-join that room
 		if roomName := c.Query("room"); roomName != "" {
 			if err := rm.Join(roomName, client); err != nil {
 				logger.Warn("failed to join room", zap.String("room", roomName), zap.Error(err))
 			} else {
+				// ensure the client leaves the room on close
 				prev := client.OnClose
 				client.OnClose = func(cc *ws.Client) {
 					_ = rm.Leave(roomName, cc)
@@ -72,6 +81,7 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 			}
 		}
 
+		// Start read and write pumps
 		go client.WritePump()
 		go client.ReadPump()
 	}
