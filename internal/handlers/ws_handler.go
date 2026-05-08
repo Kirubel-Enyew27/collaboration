@@ -53,6 +53,14 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 		if clientID != "" {
 			client.ID = clientID
 		}
+		client.OnClose = func(cc *ws.Client) {
+			for _, roomName := range cc.Rooms() {
+				_ = rm.Leave(roomName, cc)
+				if pres != nil {
+					pres.MarkOffline(cc, roomName)
+				}
+			}
+		}
 		hub.Register(client)
 
 		if pres != nil {
@@ -63,21 +71,8 @@ func NewWSHandler(hub *ws.Hub, rm *room.Manager, ed *events.Dispatcher, pres *pr
 		if roomName := c.Query("room"); roomName != "" {
 			if err := rm.Join(roomName, client); err != nil {
 				logger.Warn("failed to join room", zap.String("room", roomName), zap.Error(err))
-			} else {
-				// ensure the client leaves the room on close
-				prev := client.OnClose
-				client.OnClose = func(cc *ws.Client) {
-					_ = rm.Leave(roomName, cc)
-					if pres != nil {
-						pres.MarkOffline(cc, roomName)
-					}
-					if prev != nil {
-						prev(cc)
-					}
-				}
-				if pres != nil {
-					pres.MarkOnline(client, roomName)
-				}
+			} else if pres != nil {
+				pres.MarkOnline(client, roomName)
 			}
 		}
 

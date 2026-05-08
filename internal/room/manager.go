@@ -19,6 +19,11 @@ type Participant interface {
 	SendMessage([]byte)
 }
 
+type membershipTracker interface {
+	TrackRoom(string)
+	UntrackRoom(string)
+}
+
 // Manager manages multiple rooms and their participants.
 type Manager struct {
 	mu     sync.RWMutex
@@ -88,6 +93,9 @@ func (m *Manager) Join(name string, p Participant) error {
 	r.participants[p.GetID()] = p
 	roomCount := len(r.participants)
 	r.mu.Unlock()
+	if tracker, ok := p.(membershipTracker); ok {
+		tracker.TrackRoom(name)
+	}
 
 	m.logger.Debug("participant joined room", zap.String("room", name), zap.String("participant", p.GetID()))
 	// update metrics: per-room and global totals
@@ -118,6 +126,9 @@ func (m *Manager) Leave(name string, p Participant) error {
 	delete(r.participants, p.GetID())
 	roomCount := len(r.participants)
 	r.mu.Unlock()
+	if tracker, ok := p.(membershipTracker); ok {
+		tracker.UntrackRoom(name)
+	}
 
 	m.logger.Debug("participant left room", zap.String("room", name), zap.String("participant", p.GetID()))
 

@@ -38,6 +38,8 @@ type Client struct {
 	lastPong  time.Time
 	lastPing  time.Time
 	dropCount int
+	rooms     map[string]struct{}
+	done      chan struct{}
 	mu        sync.Mutex
 	closeOnce sync.Once
 }
@@ -52,19 +54,30 @@ func NewClient(hub *Hub, conn *websocket.Conn, logger *zap.Logger, ed *events.Di
 	MarkOffline(room.Participant, string)
 }) *Client {
 	return &Client{
-		ID:     uuid.New().String(),
-		Hub:    hub,
-		Conn:   conn,
-		Send:   make(chan []byte, 256),
-		Logger: logger,
-		ED:     ed,
-		Pres:   pres,
+		ID:       uuid.New().String(),
+		Hub:      hub,
+		Conn:     conn,
+		Send:     make(chan []byte, 256),
+		Logger:   logger,
+		ED:       ed,
+		Pres:     pres,
+		lastPong: time.Now(),
+		rooms:    make(map[string]struct{}),
+		done:     make(chan struct{}),
 	}
 }
 
 // SendMessage attempts to enqueue a message to the client without blocking.
 func (c *Client) SendMessage(b []byte) {
 	select {
+	case <-c.done:
+		return
+	default:
+	}
+
+	select {
+	case <-c.done:
+		return
 	case c.Send <- b:
 		// good
 	default:
@@ -89,7 +102,7 @@ func (c *Client) ReadPump() {
 		if c.OnClose != nil {
 			c.OnClose(c)
 		}
-		c.Conn.Close()
+		c.Close()
 	}()
 
 	c.Conn.SetReadLimit(maxMessageSize)
@@ -120,7 +133,7 @@ func (c *Client) ReadPump() {
 		if c.Pres != nil {
 			// Attempt to mark active; ignore if participant interface mismatch
 			// room name may be empty; callers will provide it when known
-			_ = tryMarkActive(c.Pres, c, c.Room)
+			_ = tryMarkActive(c.Pres, c, c.CurrentRoom())
 		}
 
 		// Dispatch event if dispatcher available
@@ -145,6 +158,10 @@ func (c *Client) WritePump() {
 
 	for {
 		select {
+		case <-c.done:
+			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
 		case message, ok := <-c.Send:
 			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
@@ -167,7 +184,14 @@ func (c *Client) WritePump() {
 		drainLoop:
 			for {
 				select {
-				case msg := <-c.Send:
+				case <-c.done:
+					_ = w.Close()
+					return
+				case msg, ok := <-c.Send:
+					if !ok {
+						_ = w.Close()
+						return
+					}
 					// separate messages by newline so clients can split if needed
 					if _, err := w.Write([]byte("\n")); err != nil {
 						break drainLoop
@@ -203,20 +227,57 @@ func (c *Client) WritePump() {
 	}
 }
 
-// Close cleanly closes the client send channel to signal writePump to exit.
+// TrackRoom records room membership for disconnect cleanup.
+func (c *Client) TrackRoom(roomName string) {
+	if roomName == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rooms[roomName] = struct{}{}
+	c.Room = roomName
+}
+
+// UntrackRoom removes room membership from the client.
+func (c *Client) UntrackRoom(roomName string) {
+	if roomName == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.rooms, roomName)
+	if c.Room == roomName {
+		c.Room = ""
+		for name := range c.rooms {
+			c.Room = name
+			break
+		}
+	}
+}
+
+// Rooms returns a snapshot of the rooms the client has joined.
+func (c *Client) Rooms() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rooms := make([]string, 0, len(c.rooms))
+	for roomName := range c.rooms {
+		rooms = append(rooms, roomName)
+	}
+	return rooms
+}
+
+// CurrentRoom returns the room currently used for presence activity.
+func (c *Client) CurrentRoom() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Room
+}
+
+// Close cleanly signals the pumps to exit and unblocks pending reads.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
-		select {
-		case <-c.Hub.done:
-			// hub already shutting down
-		default:
-		}
-		// Close send channel to signal writer to exit
-		// recover from double close just in case
-		defer func() {
-			_ = recover()
-		}()
-		close(c.Send)
+		close(c.done)
+		_ = c.Conn.Close()
 	})
 }
 
